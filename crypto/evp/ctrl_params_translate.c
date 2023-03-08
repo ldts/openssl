@@ -1642,6 +1642,71 @@ static int get_payload_public_key(enum state state,
     return ret;
 }
 
+static int get_payload_public_key_ec(enum state state,
+                                     const struct translation_st *translation,
+                                     struct translation_ctx_st *ctx)
+{
+#ifndef OPENSSL_NO_EC
+    EVP_PKEY* pkey = ctx->p2;
+    const EC_KEY *eckey = EVP_PKEY_get0_EC_KEY(pkey);
+    BN_CTX *bnctx = BN_CTX_new_ex(ossl_ec_key_get_libctx(eckey));
+    const EC_POINT *point = EC_KEY_get0_public_key(eckey);
+    const EC_GROUP *ecg = EC_KEY_get0_group(eckey);
+    unsigned char *der = NULL;
+    unsigned char *buf = NULL;
+    size_t len = 0;
+    int ret = 0;
+
+    if (bnctx == NULL)
+        return 0;
+
+    ctx->p2 = NULL;
+
+    if (EVP_PKEY_get_base_id(pkey) != EVP_PKEY_EC) {
+        ERR_raise(ERR_LIB_EVP, EVP_R_UNSUPPORTED_KEY_TYPE);
+        goto out;
+    }
+
+    /* Caller should have requested a BN, fail if not */
+    if (ctx->params->data_type != OSSL_PARAM_UNSIGNED_INTEGER)
+        goto out;
+
+    len = EC_POINT_point2buf(ecg, point, POINT_CONVERSION_UNCOMPRESSED, &buf,
+                             bnctx);
+    if (len == 0)
+        goto out;
+
+    /* The buffer points to an uncompressed DER EC point */
+    der = buf;
+
+    /* Skip DER tag and check the length */
+    if (--len % 2) {
+        ERR_raise(ERR_LIB_EVP, EVP_R_UNSUPPORTED_KEY_SIZE);
+        goto out;
+    }
+    der++;
+
+    /* Get the requested component (PUB_X or PUB_Y) from the DER buffer */
+    if (strncmp(ctx->params->key, OSSL_PKEY_PARAM_EC_PUB_X, 2) == 0)
+        ctx->p2 = BN_bin2bn(der, len / 2, NULL);
+    else if (strncmp(ctx->params->key, OSSL_PKEY_PARAM_EC_PUB_Y, 2) == 0)
+        ctx->p2 = BN_bin2bn(der + len / 2, len / 2, NULL);
+    else
+        goto out;
+
+    /* Return the payload */
+    ret = default_fixup_args(state, translation, ctx);
+out:
+    BN_CTX_free(bnctx);
+    OPENSSL_free(buf);
+    BN_free(ctx->p2);
+    return ret;
+#else
+    ERR_raise(ERR_LIB_EVP, EVP_R_UNSUPPORTED_KEY_TYPE);
+    return 0;
+#endif
+}
+
 static int get_payload_bn(enum state state,
                           const struct translation_st *translation,
                           struct translation_ctx_st *ctx, const BIGNUM *bn)
@@ -2334,6 +2399,12 @@ static const struct translation_st evp_pkey_translations[] = {
       OSSL_PKEY_PARAM_PUB_KEY,
       0 /* no data type, let get_payload_public_key() handle that */,
       get_payload_public_key },
+    { GET, -1, -1, -1, 0, NULL, NULL,
+        OSSL_PKEY_PARAM_EC_PUB_X, OSSL_PARAM_UNSIGNED_INTEGER,
+        get_payload_public_key_ec },
+    { GET, -1, -1, -1, 0, NULL, NULL,
+        OSSL_PKEY_PARAM_EC_PUB_Y, OSSL_PARAM_UNSIGNED_INTEGER,
+        get_payload_public_key_ec },
 
     /* DH and DSA */
     { GET, -1, -1, -1, 0, NULL, NULL,
